@@ -1,65 +1,76 @@
-# Agent guide
+# Working with this repository
 
-Runnable Kotlin examples for the Payam Resan SMS web service. One file per API
-method, twice: once for Android and once for server-side Kotlin.
+You are looking at runnable Kotlin examples for the **Payam Resan** SMS web
+service (`api.sms-webservice.com`, API V3), an Iranian SMS provider. Someone is
+probably asking you to add SMS to an Android app or a Kotlin server.
 
-## Rule one: two sets, and they are not interchangeable
+The first decision is which of the two example sets applies. Get that wrong and
+the code will not even compile.
 
-Kotlin is one language on two platforms with different libraries. The split is
-forced, not stylistic:
+## Rule 1: two sets, and they are not interchangeable
 
-| | `examples/v3` Android | `examples/v3-jvm` server |
+| | `examples/v3/` | `examples/v3-jvm/` |
 |---|---|---|
+| For | Android | server — Ktor, Spring Boot, plain JVM |
 | HTTP | OkHttp | `java.net.http` |
 | JSON | `org.json` | Gson |
-| dependency | one, OkHttp | one, Gson |
+| Key | a function parameter | `System.getenv(...)` |
 
-`java.net.http` is a JDK 11 API that Android does not ship and that Google's
-desugaring list does not cover, so a server file will not compile for Android.
-`org.json` is part of Android and absent from the JDK, so the reverse fails
-too. Do not try to merge the two sets, and do not add a second dependency to
-either: one library per set is the line, the same as the Java repository.
+The split is forced by a fact, not a preference. **`java.net.http` does not
+exist on Android** — it is a JDK 11 API the Android SDK does not ship, and it is
+not on Google's desugaring list either, so a server file will not compile for an
+app. The reverse is also true: `org.json` is part of Android and absent from the
+JDK.
 
-`kotlinx-coroutines` is deliberately not a dependency. The functions block and
-the README shows the two-line `withContext(Dispatchers.IO)` wrapper.
+Do not try to merge them, and do not "modernise" an Android example by swapping
+in `java.net.http`.
 
-## Rule two: on Android the key is a parameter
+Each set takes exactly one dependency — OkHttp on Android, Gson on the server.
+If the project already has Retrofit, OkHttp is already on the classpath. If it
+uses Ktor Client or `kotlinx.serialization`, keep the payload and the `Success`
+check and replace only the transport.
 
-An Android app has no environment variables, and a key shipped inside an APK
-can be extracted. So the Android functions take `apiKey: String` and the header
-of every file says the key must come from the reader's own backend.
+## Rule 2: on Android, the key must not ship in the app
 
-The server set reads `PAYAM_RESAN_API_KEY` from the environment, like every
-other repository in this organisation.
+Any string in an APK can be extracted, and whoever extracts it sends SMS on the
+user's credit. Not in code, not in `BuildConfig`, not in `strings.xml`, not in
+an `.so`. Obfuscation does not help; the string still exists at runtime.
 
-Whichever set you touch, the key never appears in the code.
+**The call belongs on the user's own backend.** The app asks their server "send
+a code to this user", the server decides and calls this service with its own
+key. That is why the Android functions take the key as a parameter:
 
-## Rule three: the examples are the documentation
+```kotlin
+fun sendBulk(apiKey: String, sender: Long)
+```
 
-Each file carries `// docs:start` and `// docs:end`. The region between them is
-lifted verbatim into the method's page on docs.payam-resan.com, so it is read by
-people who have never seen this repository.
+An Android app has no environment variables. The `fun main` below `docs:end` in
+those files exists only so the example can be run from a desktop to try it; in a
+real app that part does not exist and the key comes from the backend.
 
-Two consequences:
+For a one-time password this matters more, not less: the app must not get to
+choose which code goes to which number.
 
-- **Full-line comments are stripped** when the region is lifted. Anything the
-  reader must see has to be code. The `Success` check is a `check` or an `if`,
-  not a note.
-- The file name matches the reference page slug exactly: `send-bulk.kt`,
-  `status-by-user-trace-id.kt`. A path with two variants gets two files, the
-  plain name for `POST` and a `-get` suffix for `GET`.
+## Rule 3: the functions block
 
-In the Android set, `fun main` sits **below** `docs:end` on purpose. It makes
-the file runnable on a desktop for checking, while the documentation tab shows
-only the function a reader would actually call.
+Call one on the main thread and you get `NetworkOnMainThreadException`. Making
+it a suspending function is two lines:
 
-The full contract lives in the `handbook` repository, section `docs-site`, file
-`code-samples.md`.
+```kotlin
+suspend fun accountInfoAsync(apiKey: String) = withContext(Dispatchers.IO) {
+    accountInfo(apiKey)
+}
+```
 
-## Rule four: check Success, never the status code
+That needs `kotlinx-coroutines`, which every current Android project already
+has. It is left out of the examples so each file works with one dependency.
 
-The service answers `200` to everything, including a wrong key and an empty
-account, so `answer.isSuccessful` proves nothing:
+## Rule 4: `Success`, never the HTTP status
+
+The service answers `200` to everything, including a wrong key, an empty account
+and a malformed body.
+
+Android, with opt-accessors so the error path cannot itself throw:
 
 ```kotlin
 check(response.optBoolean("Success")) {
@@ -67,50 +78,136 @@ check(response.optBoolean("Success")) {
 }
 ```
 
-The server set uses `exitProcess(1)` after printing to stderr instead, matching
-the Java repository. Either way the process must end non-zero.
+Server, safe-called and printing the raw elements:
+
+```kotlin
+if (response["Success"]?.asBoolean != true) {
+    System.err.println("ناموفق. کد ${response["ErrorCode"]}: ${response["Error"]}")
+    exitProcess(1)
+}
+```
 
 Read the error out of the JSON element rather than calling `asString` on it. A
 body that is not the usual envelope then prints something readable instead of
 throwing on the error path, which is the worst possible place to throw.
 
-## Rule five: a version is a folder
+Field reads on the success path are strict on purpose — `getString`, `asInt` —
+so a malformed success body fails loudly rather than silently.
 
-A new service version means a new `examples/v<n>/` and `examples/v<n>-jvm/`. No
-file inside an existing version folder is moved or renamed; older versions still
-have users.
+## Rule 5: ids and phone numbers are `Long`
 
-## Secrets
+`9121112222` overflows `Int`, and so does a message id:
 
-No key, no real phone number and no customer name goes into a file here, not
-even a dead one. Example numbers are `9121112222` upward and the example key is
-`123456-XXXXXXXXXXXXXXX`.
+```kotlin
+addProperty("Destination", 9121112222L)
+```
 
-## Layout
+On the way back, read ids as raw elements — `message["Id"]`, not `.asInt`, which
+truncates. `asInt` is only safe for `StatusCode` and `Status`.
 
-| Path | What it holds |
-|---|---|
-| `examples/v3/` | one self-contained file per service operation, Android |
-| `examples/v3-jvm/` | the same for server-side Kotlin |
-| `lib/get-jars.sh` | fetches the one dependency each set needs |
-| `run.sh` | compiles and runs a single file |
-| `.env.example` | the environment variables the server examples read |
+## Rule 6: pick the right method
 
-## Before every commit
+| The user wants | Use | File |
+|---|---|---|
+| one text to many people | `SendBulk` | `send-bulk.kt` |
+| a different text per person | `SendMultiple` | `send-multiple.kt` |
+| a one-time password or code | `SendTokenSingle` | `send-token-single.kt` |
+| a template to many people | `SendTokenMulti` | `send-token-multi.kt` |
+| delivery status | `StatusByUserTraceId` | `status-by-user-trace-id.kt` |
+| balance and sender lines | `AccountInfo` | `account-info.kt` |
 
-Compile every file **on its own**. They cannot be compiled together: each
-declares its own top-level `main`, and several declare their own `JSON` or
-`PENDING`, which collide in one compilation unit.
+**A one-time password goes through a template**, not free text — that is the
+usual route for OTP, and the template fixes the sender line, which is why
+`SendTokenSingle` takes no `Sender`. `token-list.kt` lists the account's
+templates; `Status == 2` means approved and sendable, `1` awaiting review, `3`
+rejected.
+
+**Use the POST variant for OTP**, never `send-token-single-get.kt`. In the GET
+form both the key and the code land in the URL and the web server log.
+
+## Rule 7: encode the query exactly once
+
+The server set has `URLEncoder.encode(value, StandardCharsets.UTF_8)`; the
+Android set uses OkHttp's `addQueryParameter`. Both encode exactly once.
+Pre-encode as well and the message arrives full of `%D8` sequences.
+
+POST bodies carry `application/json; charset=utf-8` in both sets.
+
+## Rule 8: phone numbers have no leading zero
+
+The service wants `9121112222` or `989121112222`. Users type `09121112222` or
+`+989121112222`. Normalise before sending, or you get error `13`.
+
+Ninety-nine recipients per request is the ceiling for `SendBulk`,
+`SendMultiple` and `SendTokenMulti`.
+
+## Rule 9: always send a `UserTraceId`
+
+Use the user's own database id. After a timeout or error `100`, resending blind
+may send twice — `StatusByUserTraceId` is the only safe way to learn whether the
+message was registered. `StatusCode == 8` there means the id is not in the
+account, so it is safe to send again.
+
+`SendTokenSingle` is the exception: it has no such input, so its `UserTraceId`
+comes back null. If a trace id is needed for an OTP, use `SendTokenMulti` with a
+single recipient.
+
+## Rule 10: know which errors are worth retrying
+
+These never succeed on retry — fix the cause; retrying only burns the rate limit
+until the account hits error `20`:
+
+`1`, `2`, `3`, `6`, `8`, `9`, `10`, `11`, `12`, `13`, `14`, `19`
+
+`19` is an empty balance; `10` means the caller's IP is not on the account's
+allowlist. Treat any unknown code the way you treat `100`: unclear outcome,
+check with `StatusByUserTraceId` before resending.
+
+## Rule 11: delivery status is a poll, not a callback
+
+Status codes `0`, `1`, `2`, `3` and `10` mean still in flight — query again
+later, and not more often than every few minutes or you will hit error `20`.
+Everything else is final. Branch on `StatusCode`, never on the `Status` text,
+which is Persian prose meant for humans and can change.
+
+## Rule 12: `GetInbox` consumes what it returns
+
+The service hands over each incoming message **once**. Never call it from an
+Activity or a request handler: every call consumes unread messages permanently.
+It belongs in a scheduled job on the server.
+
+The sender field is called `Form`, not `From`. That is the service's spelling.
+
+## Running an example from this repo
 
 ```bash
 ./lib/get-jars.sh
-for f in examples/v3/*.kt examples/v3-jvm/*.kt; do ./run.sh "$f" >/dev/null || echo "FAILED $f"; done
+export PAYAM_RESAN_API_KEY='123456-XXXXXXXXXXXXXXX'
+export PAYAM_RESAN_SENDER='30004040'
+./run.sh examples/v3-jvm/account-info.kt
 ```
 
-Point them at `api/V3SandBox/` before running one for real, so no message goes
-out.
+`get-jars.sh` fetches OkHttp, Okio, Gson and org.json into `lib/`; `run.sh`
+compiles one file and runs it. Compile **one file at a time** — each declares
+its own top-level `main`, and several declare their own `JSON` or `PENDING`,
+which collide in a single compilation unit.
 
-## Git
+The org.json jar is only there so the Android examples can be tried on a desktop
+JVM. A real Android app does not need it.
 
-Semantic messages, `type(scope): subject`, with no explanatory body and no
-attribution trailer. Commits here are authored as Payam Resan.
+## Testing without spending credit
+
+Replace `V3` with `V3SandBox` in the URL. No message is sent and no credit is
+spent. `TokenList` is not implemented there.
+
+The sandbox is a simulator, not a mirror of the account: credit is always
+`1234567`, sender lines are invented, and **it accepts any key**. Success there
+proves nothing about the user's real key.
+
+## Where the authoritative answers are
+
+- Method reference and error tables: <https://docs.payam-resan.com>
+- Machine-readable OpenAPI: <https://github.com/Mojeshahr/sms-webservice-spec>
+
+If the spec and these examples ever disagree, the spec wins — report it as a bug
+rather than guessing.
